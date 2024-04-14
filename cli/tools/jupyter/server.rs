@@ -36,6 +36,7 @@ pub struct JupyterServer {
   // This is Arc<Mutex<>>, so we don't hold RefCell borrows across await
   // points.
   iopub_socket: Arc<Mutex<Connection<zeromq::PubSocket>>>,
+  stdin_socket: Arc<Mutex<Connection<zeromq::RouterSocket>>>,
   repl_session: repl::ReplSession,
 }
 
@@ -51,11 +52,12 @@ impl JupyterServer {
       bind_socket::<zeromq::RouterSocket>(&spec, spec.shell_port).await?;
     let control_socket =
       bind_socket::<zeromq::RouterSocket>(&spec, spec.control_port).await?;
-    let _stdin_socket =
+    let stdin_socket =
       bind_socket::<zeromq::RouterSocket>(&spec, spec.stdin_port).await?;
     let iopub_socket =
       bind_socket::<zeromq::PubSocket>(&spec, spec.iopub_port).await?;
     let iopub_socket = Arc::new(Mutex::new(iopub_socket));
+    let stdin_socket = Arc::new(Mutex::new(stdin_socket));
     let last_execution_request = Rc::new(RefCell::new(None));
 
     // Store `iopub_socket` in the op state so it's accessible to the runtime API.
@@ -72,6 +74,7 @@ impl JupyterServer {
     let mut server = Self {
       execution_count: 0,
       iopub_socket: iopub_socket.clone(),
+      stdin_socket: stdin_socket.clone(),
       last_execution_request: last_execution_request.clone(),
       repl_session,
     };
@@ -184,6 +187,26 @@ impl JupyterServer {
         }
       }
     }
+  }
+
+  async fn handle_input(
+    &self,
+    msg: &JupyterMessage,
+    mut connection: Connection<zeromq::RouterSocket>,
+    prompt: &str,
+    password: bool,
+  ) -> Option<String> {
+
+    if !msg.allow_stdin() {
+        return None;
+    }
+    let stdin_request = msg
+        .new_message("input_request")
+        .with_content(json!({ "prompt": prompt, "password": password }));
+    stdin_request.send(&mut *self.iopub_socket.lock().await).await.ok()?;
+
+    let input_response = JupyterMessage::read(&mut connection).await.ok()?;
+    Some(input_response.value().to_string())
   }
 
   async fn handle_shell(
@@ -355,6 +378,8 @@ impl JupyterServer {
       .send(&mut *self.iopub_socket.lock().await)
       .await?;
 
+    // TODO: figure out how to execute_with_callbacks
+    let (eval_result, message) = self.handle_input(&msg, connection.borrow(), ">", false);
     let result = self
       .repl_session
       .evaluate_line_with_object_wrapping(msg.code())
