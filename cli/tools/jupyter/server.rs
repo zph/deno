@@ -24,6 +24,7 @@ use zeromq::SocketSend;
 use super::jupyter_msg::Connection;
 use super::jupyter_msg::JupyterMessage;
 use super::ConnectionSpec;
+use std::borrow::Borrow;
 
 pub enum StdioMsg {
   Stdout(String),
@@ -125,7 +126,7 @@ impl JupyterServer {
     last_execution_request: Rc<RefCell<Option<JupyterMessage>>>,
     stdio_msg: StdioMsg,
   ) {
-    let maybe_exec_result = last_execution_request.borrow().clone();
+    let maybe_exec_result = <Lrc<RefCell<std::option::Option<JupyterMessage>>> as Borrow<Borrowed>>::borrow(&last_execution_request).clone();
     if let Some(exec_request) = maybe_exec_result {
       let (name, text) = match stdio_msg {
         StdioMsg::Stdout(text) => ("stdout", text),
@@ -192,7 +193,6 @@ impl JupyterServer {
   async fn handle_input(
     &self,
     msg: &JupyterMessage,
-    mut connection: Connection<zeromq::RouterSocket>,
     prompt: &str,
     password: bool,
   ) -> Option<String> {
@@ -205,7 +205,7 @@ impl JupyterServer {
         .with_content(json!({ "prompt": prompt, "password": password }));
     stdin_request.send(&mut *self.iopub_socket.lock().await).await.ok()?;
 
-    let input_response = JupyterMessage::read(&mut connection).await.ok()?;
+    let input_response = JupyterMessage::read(&mut *self.stdin_socket.lock().await).await.ok()?;
     Some(input_response.value().to_string())
   }
 
@@ -379,7 +379,12 @@ impl JupyterServer {
       .await?;
 
     // TODO: figure out how to execute_with_callbacks
-    let (eval_result, message) = self.handle_input(&msg, connection.borrow(), ">", false);
+    let r = self.handle_input(&msg, ">", false).await;
+//(eval_result, message)
+    let message = match r {
+      Some(r) => r,
+      None => "".to_string(), // TODO: fix
+    };
     let result = self
       .repl_session
       .evaluate_line_with_object_wrapping(msg.code())
