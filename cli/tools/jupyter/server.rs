@@ -25,7 +25,6 @@ use super::jupyter_msg::Connection;
 use super::jupyter_msg::JupyterMessage;
 use super::ConnectionSpec;
 
-
 pub enum StdioMsg {
   Stdout(String),
   Stderr(String),
